@@ -1,0 +1,10 @@
+# 环境变量（含 API Key，禁止提交）
+.env
+
+# HuggingFace 模型缓存
+hf_cache/
+models/
+
+# Python
+__pycache__/
+*.pyc

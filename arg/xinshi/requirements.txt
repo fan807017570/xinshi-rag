@@ -1,0 +1,25 @@
+# Web 服务
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-dotenv>=1.0.0
+python-multipart>=0.0.9
+cryptography>=42.0.0
+
+# LangChain 及向量检索
+langchain>=0.3.0
+langchain-community>=0.3.0
+langchain-huggingface>=0.1.0
+langchain-deepseek>=0.1.0
+# ingest.py directly imports these splitters; do not rely on a transitive install.
+langchain-text-splitters>=0.3.0
+
+# 向量数据库
+pymilvus>=2.4.0
+
+# Embedding / Reranker（CPU-only torch 以减小镜像体积）
+sentence-transformers>=3.0.0
+transformers>=4.40.0
+huggingface-hub>=0.24.0
+
+# torch（macOS 用官方源；Docker/Linux 镜像构建时在 Dockerfile 里单独指定 cpu wheel）
+torch>=2.2.0

@@ -1,0 +1,121 @@
+version: "3.9"
+
+# 端口规划（避免与本机已有服务冲突）：
+#   RAG 服务:  18765 (宿主机) → 8765  (容器)
+#   Milvus:    19531 (宿主机) → 19530 (容器)   ← 本机 Milvus 占用 19530
+#   MinIO API: 19000 (宿主机) → 9000  (容器)
+#   MinIO UI:  19001 (宿主机) → 9001  (容器)
+#
+# 如需自定义，在同目录 .env 文件中覆盖以下变量：
+#   RAG_PORT=18765
+#   MILVUS_EXPOSED_PORT=19531
+#   MINIO_API_PORT=19000
+#   MINIO_UI_PORT=19001
+#   XINSHI_BASE_DATA_DIR=./data/base   # ingest.py 读取知识库 Markdown
+#   XINSHI_DOCS_DATA_DIR=./data/docs   # Web 上传/列举文档目录
+#   XINSHI_EMBEDDING_MODEL_DIR=/opt/models/bge-base-zh-v1.5
+#   XINSHI_RERANK_MODEL_DIR=/opt/models/bge-reranker-large
+
+services:
+  xinshi-rag:
+    build:
+      context: ../..          # xinshi-rag/
+      dockerfile: arg/xinshi/Dockerfile
+    image: xinshi-rag:latest
+    container_name: xinshi-rag
+    ports:
+      - "${RAG_PORT:-18765}:8765"
+    environment:
+      # DeepSeek API Key（必填，或写入 .env 文件）
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_MODEL=deepseek-v4-pro
+      # 容器内通过服务名访问 milvus，端口仍是内部 19530
+      - MILVUS_HOST=milvus-standalone
+      - MILVUS_PORT=19530
+      - MILVUS_COLLECTION=Xinshi_school
+      - XINSHI_LOG_LEVEL=INFO
+    volumes:
+      - hf_cache:/app/hf_cache
+      # 宿主机知识库目录 -> 容器 ingest 读取目录
+      - "${XINSHI_BASE_DATA_DIR:-/opt/xinshi/data/docs}:/app/arg/xinshi/data/base:ro"
+      # 宿主机上传目录 -> 容器 Web 上传/列举目录
+      - "${XINSHI_DOCS_DATA_DIR:-/opt/xinshi/data/docs}:/app/arg/xinshi/data/docs"
+      # 宿主机 embedding 模型目录 -> 容器 ingest/retriever 读取目录
+      - "${XINSHI_EMBEDDING_MODEL_DIR:-/opt/models/bge-base-zh-v1.5}:/app/models/bge-base-zh-v1.5:ro"
+      # 宿主机 rerank 模型目录 -> 容器 reranker 读取目录
+      - "${XINSHI_RERANK_MODEL_DIR:-/opt/models/bge-reranker-base}:/app/models/bge-reranker-base:ro"
+    depends_on:
+      milvus-standalone:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - xinshi-net
+
+  # ── Milvus 单机版（含 etcd + minio）────────────────────────────────────────
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: xinshi-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    command: >
+      etcd
+      -advertise-client-urls=http://127.0.0.1:2379
+      -listen-client-urls=http://0.0.0.0:2379
+      --data-dir /etcd
+    volumes:
+      - etcd_data:/etcd
+    # etcd 只在容器内网使用，不暴露到宿主机
+    networks:
+      - xinshi-net
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-13T19-46-17Z
+    container_name: xinshi-minio
+    environment:
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT:-19000}:9000"
+      - "${MINIO_UI_PORT:-19001}:9001"
+    networks:
+      - xinshi-net
+
+  milvus-standalone:
+    image: milvusdb/milvus:v2.4.4
+    container_name: xinshi-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      - ETCD_ENDPOINTS=etcd:2379
+      - MINIO_ADDRESS=minio:9000
+    ports:
+      # 宿主机用 19531，避免与本机 Milvus(19530) 冲突
+      - "${MILVUS_EXPOSED_PORT:-19531}:19530"
+    depends_on:
+      - etcd
+      - minio
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    networks:
+      - xinshi-net
+
+volumes:
+  hf_cache:
+  etcd_data:
+  minio_data:
+  milvus_data:
+
+networks:
+  xinshi-net:
+    driver: bridge
