@@ -9,6 +9,11 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+# rag/build/ contains versioned deployment scripts; keep the generic build rule
+# for other generated build directories.
+!rag/build/
+!rag/build/*.sh
+!rag/build/*.txt
 develop-eggs/
 dist/
 downloads/

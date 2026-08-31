@@ -1,0 +1,12 @@
+.git
+.gitignore
+.dockerignore
+.venv
+env/
+venv/
+**/__pycache__/
+**/*.py[codz]
+**/.env
+models/
+hf_cache/
+install/milvus/.env

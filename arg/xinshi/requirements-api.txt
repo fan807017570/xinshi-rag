@@ -1,4 +1,0 @@
-# 与现有 venv 中 langchain / pymilvus 等配合，仅补充 Web 服务依赖
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-cryptography>=42.0.0

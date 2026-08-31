@@ -1,4 +1,0 @@
-# 默认安装配置统一使用 CPU 版本 PyTorch。
--r requirements-common.txt
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.6.0+cpu

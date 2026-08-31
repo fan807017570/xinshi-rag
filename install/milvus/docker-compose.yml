@@ -1,0 +1,73 @@
+services:
+  etcd:
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: xinshi-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    command: >
+      etcd
+      -advertise-client-urls=http://127.0.0.1:2379
+      -listen-client-urls=http://0.0.0.0:2379
+      --data-dir /etcd
+    volumes:
+      - etcd_data:/etcd
+    networks:
+      - xinshi-net
+
+  minio:
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    image: minio/minio:RELEASE.2023-03-13T19-46-17Z
+    container_name: xinshi-minio
+    environment:
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT:-19000}:9000"
+      - "${MINIO_UI_PORT:-19001}:9001"
+    networks:
+      - xinshi-net
+
+  milvus-standalone:
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    image: milvusdb/milvus:v2.4.4
+    container_name: xinshi-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      - ETCD_ENDPOINTS=etcd:2379
+      - MINIO_ADDRESS=minio:9000
+    ports:
+      # 宿主机默认用 19531，避免与宿主机已有 Milvus 19530 冲突。
+      - "${MILVUS_EXPOSED_PORT:-19531}:19530"
+    depends_on:
+      - etcd
+      - minio
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    networks:
+      - xinshi-net
+
+volumes:
+  etcd_data:
+    name: ${ETCD_VOLUME_NAME:-xinshi_etcd_data}
+  minio_data:
+    name: ${MINIO_VOLUME_NAME:-xinshi_minio_data}
+  milvus_data:
+    name: ${MILVUS_VOLUME_NAME:-xinshi_milvus_data}
+
+networks:
+  # 应用 Docker Compose 和 Ubuntu 原生应用共用此网络/地址约定。
+  xinshi-net:
+    name: ${XINSHI_NETWORK:-xinshi-net}
