@@ -1,0 +1,1 @@
+{"question":"学校地址在哪里","expected_document_ids":["替换为接口 source_details 返回的 document_id"],"expected_answer_terms":["吴村镇玉田村"],"use_rewrite":true}

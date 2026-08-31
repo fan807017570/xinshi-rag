@@ -1,0 +1,4 @@
+# macOS 原生运行依赖。
+# macOS 的 PyTorch CPU/MPS wheel 发布在 PyPI，不使用 Linux 专用的 +cpu 源。
+-r ../requirements-common.txt
+torch==2.6.0

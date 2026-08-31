@@ -1,0 +1,43 @@
+services:
+  xinshi-rag:
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    build:
+      context: ../..          # xinshi-rag/
+      dockerfile: rag/docker-install/Dockerfile
+    image: xinshi-rag:latest
+    container_name: xinshi-rag
+    ports:
+      - "${RAG_PORT:-18765}:8765"
+    environment:
+      # DeepSeek API Key（必填，或写入 .env 文件）
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      # 配置文件使用 docker profile；业务参数全部从挂载文件读取。
+      - XINSHI_CONFIG_FILE=/app/config/application.ini
+      - XINSHI_CONFIG_PROFILE=docker
+      - XINSHI_LOG_LEVEL=${XINSHI_LOG_LEVEL:-INFO}
+    volumes:
+      # 修改宿主机配置后只需重启容器，不需要重新构建镜像。
+      - "${XINSHI_CONFIG_DIR:-../../config}:/app/config:ro"
+      - hf_cache:/app/hf_cache
+      # 宿主机知识库目录 -> 容器 ingest 读取目录
+      - "${XINSHI_BASE_DATA_DIR:-../data/base}:/app/rag/data/base:ro"
+      # 宿主机上传目录 -> 容器 Web 上传/列举目录
+      - "${XINSHI_DOCS_DATA_DIR:-../data/docs}:/app/rag/data/docs"
+      # 宿主机 embedding 模型目录 -> 容器 ingest/retriever 读取目录
+      - "${XINSHI_EMBEDDING_MODEL_DIR:-../models/bge-base-zh-v1.5}:/app/rag/models/bge-base-zh-v1.5:ro"
+      # 宿主机 rerank 模型目录 -> 容器 reranker 读取目录
+      - "${XINSHI_RERANK_MODEL_DIR:-../models/bge-reranker-large}:/app/rag/models/bge-reranker-large:ro"
+    restart: unless-stopped
+    networks:
+      - xinshi-net
+
+volumes:
+  hf_cache:
+    name: ${RAG_HF_VOLUME_NAME:-xinshi-rag-hf-cache}
+
+networks:
+  # 由 install/milvus/install.sh 创建，应用只加入，不负责创建基础设施网络。
+  xinshi-net:
+    name: ${XINSHI_NETWORK:-xinshi-net}
+    external: true

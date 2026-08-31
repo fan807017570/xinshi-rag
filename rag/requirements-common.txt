@@ -1,0 +1,27 @@
+# Web 服务
+# PyMilvus 2.4 仍依赖 pkg_resources，并要求 setuptools 保持在 81 以下。
+setuptools>=70.0.0,<81.0.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-dotenv>=1.0.0
+python-multipart>=0.0.9
+cryptography>=42.0.0
+
+# LangChain 及向量检索
+langchain==1.3.17
+# Milvus 2.4 暂时需要 community 中保留的旧适配器；
+# 升级数据库后迁移到 langchain-milvus。
+langchain-community==0.4.2
+langchain-huggingface==1.2.2
+langchain-deepseek==1.1.0
+# ingest.py directly imports these splitters; do not rely on a transitive install.
+langchain-text-splitters==1.1.2
+
+# 向量数据库
+# 与 install/milvus/docker-compose.yml 中的 Milvus 2.4.x 保持同一 minor 版本。
+pymilvus==2.4.15
+
+# Embedding / Reranker
+sentence-transformers>=3.0.0
+transformers>=4.40.0
+huggingface-hub>=0.24.0
