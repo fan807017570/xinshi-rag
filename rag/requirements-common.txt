@@ -9,6 +9,8 @@ cryptography>=42.0.0
 
 # LangChain 及向量检索
 langchain==1.3.17
+# 成绩查询编排直接使用 Graph API，显式声明而非依赖 LangChain 传递安装。
+langgraph==1.2.11
 # Milvus 2.4 暂时需要 community 中保留的旧适配器；
 # 升级数据库后迁移到 langchain-milvus。
 langchain-community==0.4.2
@@ -22,6 +24,10 @@ langchain-text-splitters==1.1.2
 pymilvus==2.4.15
 
 # Embedding / Reranker
-sentence-transformers>=3.0.0
+# 意图识别：本地 BGE 向量 + 校准 LinearSVC。
+numpy<2
+joblib>=1.4.0
+scikit-learn==1.9.0
+sentence-transformers==6.0.1
 transformers>=4.40.0
 huggingface-hub>=0.24.0

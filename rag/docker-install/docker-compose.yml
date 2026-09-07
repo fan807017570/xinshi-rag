@@ -16,6 +16,15 @@ services:
       - XINSHI_CONFIG_FILE=/app/config/application.ini
       - XINSHI_CONFIG_PROFILE=docker
       - XINSHI_LOG_LEVEL=${XINSHI_LOG_LEVEL:-INFO}
+      # 意图识别阈值可按部署环境调整；模型路径使用容器内固定路径。
+      - SCORE_INTENT_MODEL_DIR=${SCORE_INTENT_MODEL_DIR:-/app/rag/models/bge-base-zh-v1.5}
+      - SCORE_INTENT_CLASSIFIER_PATH=${SCORE_INTENT_CLASSIFIER_PATH:-/app/rag/models/intent/svc.joblib}
+      - SCORE_INTENT_MODEL_VERSION=${SCORE_INTENT_MODEL_VERSION:-local-bge-base-zh-v1.5-svc-v1}
+      - SCORE_INTENT_THRESHOLD=${SCORE_INTENT_THRESHOLD:-0.98}
+      - SCORE_INTENT_AMBIGUOUS_THRESHOLD=${SCORE_INTENT_AMBIGUOUS_THRESHOLD:-0.90}
+      - SCORE_INTENT_LLM_THRESHOLD=${SCORE_INTENT_LLM_THRESHOLD:-0.85}
+      - SCORE_INTENT_LLM_AMBIGUOUS_THRESHOLD=${SCORE_INTENT_LLM_AMBIGUOUS_THRESHOLD:-0.60}
+      - SCORE_INTENT_LLM_TIMEOUT_MS=${SCORE_INTENT_LLM_TIMEOUT_MS:-1500}
     volumes:
       # 修改宿主机配置后只需重启容器，不需要重新构建镜像。
       - "${XINSHI_CONFIG_DIR:-../../config}:/app/config:ro"

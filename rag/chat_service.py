@@ -1,21 +1,22 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
-import json
 import threading
 import time
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from rag.application import answer_question, stream_answer_question
+from rag.chat_context import ChatExecutionContext
 from rag.config import MAX_HISTORY_MESSAGES
-from rag.logutil import preview_text
 from rag.schemas import ChatRequest, ChatResponse
 
 log = logging.getLogger(__name__)
@@ -122,31 +123,33 @@ def _history_for(req: ChatRequest) -> list[dict[str, str]]:
     return [m.model_dump() for m in req.history[-MAX_HISTORY_MESSAGES:]]
 
 
-def _chat_response(req: ChatRequest) -> ChatResponse:
+def _chat_response(
+    req: ChatRequest,
+    execution_context: ChatExecutionContext,
+) -> ChatResponse:
     date_resp = _date_chat_response(req.message)
     if date_resp is not None:
         return date_resp
 
     if is_non_natural_language_message(req.message):
         log.info(
-            "chat short-circuited non-natural message_len=%d preview=%r",
+            "chat short-circuited non-natural message_len=%d",
             len(req.message),
-            preview_text(req.message, 80),
         )
         return _direct_chat_response(req.message)
 
     hist = _history_for(req)
     log.info(
-        "chat request use_rewrite=%s history=%d message_len=%d preview=%r",
+        "chat request use_rewrite=%s history=%d message_len=%d",
         req.use_rewrite,
         len(hist),
         len(req.message),
-        preview_text(req.message, 80),
     )
     out = answer_question(
         req.message.strip(),
         history=hist,
         use_rewrite=req.use_rewrite,
+        execution_context=execution_context,
     )
     return ChatResponse(
         answer=out["answer"],
@@ -255,42 +258,47 @@ def _send_wechat_customer_text(openid: str, content: str) -> None:
         if result.get("errcode") != 0:
             raise RuntimeError(f"微信客服消息发送失败: {result}")
         log.info(
-            "wechat customer reply sent openid=%s part=%d bytes=%d",
-            openid,
+            "wechat customer reply sent identity=%s part=%d bytes=%d",
+            _identity_digest(openid),
             idx,
-        len(part.encode("utf-8")),
+            len(part.encode("utf-8")),
         )
 
 
-def _run_wechat_async_reply(req: ChatRequest, openid: str) -> None:
+def _run_wechat_async_reply(req: ChatRequest, openid: str, msg_id: str | None) -> None:
     t0 = time.perf_counter()
     log.info(
-        "wechat async chat started openid=%s use_rewrite=%s message_len=%d preview=%r",
-        openid,
+        "wechat async chat started identity=%s use_rewrite=%s message_len=%d",
+        _identity_digest(openid),
         req.use_rewrite,
         len(req.message),
-        preview_text(req.message, 80),
     )
     try:
-        resp = _chat_response(req)
+        resp = _chat_response(
+            req,
+            ChatExecutionContext.wechat(
+                openid=openid,
+                message_id=msg_id,
+            ),
+        )
     except Exception:
-        log.exception("wechat async answer_question failed openid=%s", openid)
+        log.exception("wechat async answer_question failed identity=%s", _identity_digest(openid))
         try:
             _send_wechat_customer_text(openid, "抱歉，刚才的问题暂时处理失败，请稍后再试。")
         except Exception:
-            log.exception("wechat async failure notice failed openid=%s", openid)
+            log.exception("wechat async failure notice failed identity=%s", _identity_digest(openid))
         return
 
     try:
         _send_wechat_customer_text(openid, resp.answer)
         log.info(
-            "wechat async chat completed openid=%s elapsed=%.3fs answer_len=%d",
-            openid,
+            "wechat async chat completed identity=%s elapsed=%.3fs answer_len=%d",
+            _identity_digest(openid),
             time.perf_counter() - t0,
             len(resp.answer),
         )
     except Exception:
-        log.exception("wechat customer reply failed openid=%s", openid)
+        log.exception("wechat customer reply failed identity=%s", _identity_digest(openid))
 
 
 def _release_wechat_reply_slot(_future) -> None:
@@ -303,16 +311,16 @@ def _release_wechat_reply_slot(_future) -> None:
 def _send_wechat_busy_notice(openid: str) -> None:
     try:
         _send_wechat_customer_text(openid, _WECHAT_BUSY_MESSAGE)
-        log.info("wechat busy notice sent openid=%s", openid)
+        log.info("wechat busy notice sent identity=%s", _identity_digest(openid))
     except Exception:
-        log.exception("wechat busy notice failed openid=%s", openid)
+        log.exception("wechat busy notice failed identity=%s", _identity_digest(openid))
 
 
-def _try_submit_wechat_async_reply(req: ChatRequest, openid: str) -> bool:
+def _try_submit_wechat_async_reply(req: ChatRequest, openid: str, msg_id: str | None) -> bool:
     if not _wechat_reply_slots.acquire(blocking=False):
         log.warning(
-            "wechat async chat rejected openid=%s workers=%d queue_size=%d message_len=%d",
-            openid,
+            "wechat async chat rejected identity=%s workers=%d queue_size=%d message_len=%d",
+            _identity_digest(openid),
             _WECHAT_CUSTOM_REPLY_WORKERS,
             _WECHAT_CUSTOM_REPLY_QUEUE_SIZE,
             len(req.message),
@@ -326,10 +334,10 @@ def _try_submit_wechat_async_reply(req: ChatRequest, openid: str) -> bool:
         return False
 
     try:
-        future = _wechat_reply_executor.submit(_run_wechat_async_reply, req, openid)
+        future = _wechat_reply_executor.submit(_run_wechat_async_reply, req, openid, msg_id)
     except Exception:
         _wechat_reply_slots.release()
-        log.exception("wechat async chat submit failed openid=%s", openid)
+        log.exception("wechat async chat submit failed identity=%s", _identity_digest(openid))
         threading.Thread(
             target=_send_wechat_busy_notice,
             args=(openid,),
@@ -345,7 +353,9 @@ def _try_submit_wechat_async_reply(req: ChatRequest, openid: str) -> bool:
 def handle_chat_request(
     req: ChatRequest,
     *,
+    execution_context: ChatExecutionContext | None = None,
     wechat_openid: str | None = None,
+    wechat_msg_id: str | None = None,
     async_wechat_reply: bool = False,
 ) -> ChatResponse:
     if async_wechat_reply:
@@ -360,21 +370,32 @@ def handle_chat_request(
             use_rewrite=req.use_rewrite,
             include_retrieval_trace=req.include_retrieval_trace,
         )
-        submitted = _try_submit_wechat_async_reply(queued_req, openid)
+        submitted = _try_submit_wechat_async_reply(queued_req, openid, wechat_msg_id)
         log.info(
-            "wechat async chat queued=%s openid=%s workers=%d queue_size=%d message_len=%d",
+            "wechat async chat queued=%s identity=%s workers=%d queue_size=%d message_len=%d",
             submitted,
-            openid,
+            _identity_digest(openid),
             _WECHAT_CUSTOM_REPLY_WORKERS,
             _WECHAT_CUSTOM_REPLY_QUEUE_SIZE,
             len(req.message),
         )
         return _empty_chat_response()
 
-    return _chat_response(req)
+    return _chat_response(
+        req,
+        execution_context or ChatExecutionContext.internal(),
+    )
 
 
-def iter_stream_chat_events(req: ChatRequest) -> Iterator[dict]:
+def _identity_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def iter_stream_chat_events(
+    req: ChatRequest,
+    *,
+    rag_runtime_validated: bool = False,
+) -> Iterator[dict]:
     date_resp = _date_chat_response(req.message)
     if date_resp is not None:
         yield {
@@ -389,11 +410,10 @@ def iter_stream_chat_events(req: ChatRequest) -> Iterator[dict]:
 
     hist = _history_for(req)
     log.info(
-        "chat_stream request use_rewrite=%s history=%d message_len=%d preview=%r",
+        "chat_stream request use_rewrite=%s history=%d message_len=%d",
         req.use_rewrite,
         len(hist),
         len(req.message),
-        preview_text(req.message, 80),
     )
     try:
         yield from stream_answer_question(
@@ -401,6 +421,7 @@ def iter_stream_chat_events(req: ChatRequest) -> Iterator[dict]:
             history=hist,
             use_rewrite=req.use_rewrite,
             include_retrieval_trace=req.include_retrieval_trace,
+            rag_runtime_validated=rag_runtime_validated,
         )
     except Exception as exc:
         log.exception("chat_stream endpoint error: %s", exc)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -30,22 +31,29 @@ if str(_ROOT) not in sys.path:
 
 # 本地开发时自动加载 rag/.env（Docker 环境中 .env 不存在，此行无副作用）
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+)
 
 from rag.application import get_rag_runtime_status
+from rag.chat_context import ChatExecutionContext
 from rag.chat_service import (
     handle_chat_request,
     is_non_natural_language_message,
     iter_stream_chat_events,
 )
+from rag.llm import LLMConfigurationError, LLMRequestError, get_llm_runtime_status
 from rag.logutil import configure_logging
-from rag.llm import LLMConfigurationError, get_llm_runtime_status
 from rag.schemas import ChatRequest, ChatResponse
-from rag.wechat_crypto import WeChatCryptoError, verify_url_signature
+from rag.wechat_crypto import WeChatConfig, WeChatCryptoError, verify_url_signature
 from rag.wechat_service import (
     WeChatPayloadError,
     WeChatSignatureError,
@@ -68,6 +76,12 @@ _SAFE_FILENAME_RE = re.compile(r"^[\w\-. ]+$")
 
 app = FastAPI(title="新实中学招生顾问", version="1.0")
 _HAS_PYTHON_MULTIPART = find_spec("multipart") is not None
+
+
+@app.on_event("startup")
+async def validate_wechat_callback_config():
+    if os.environ.get("WECHAT_CALLBACK_ENABLED", "false").strip().lower() == "true":
+        WeChatConfig.from_env().validate()
 
 
 @app.middleware("http")
@@ -127,7 +141,6 @@ async def chat_wechat_message(
     timestamp: str = Query(..., description="时间戳"),
     nonce: str = Query(..., description="随机数"),
     signature: str | None = Query(None, description="微信 URL 签名，POST 加密消息不使用"),
-    openid: str | None = Query(None, description="微信 openid"),
     encrypt_type: str | None = Query(None, description="加密类型"),
 ):
     if encrypt_type and encrypt_type != "aes":
@@ -141,7 +154,6 @@ async def chat_wechat_message(
             msg_signature=msg_signature,
             timestamp=timestamp,
             nonce=nonce,
-            openid=openid,
             signature_present=bool(signature),
         )
     except WeChatSignatureError:
@@ -157,7 +169,6 @@ async def chat_wechat_message(
         return PlainTextResponse("")
     rendered_reply = render_encrypted_envelope(encrypted_reply, envelope.body_format)
     if envelope.body_format == "xml":
-        log.info("wechat response encrypted xml=%s", rendered_reply)
         return PlainTextResponse(rendered_reply, media_type="application/xml; charset=utf-8")
     return JSONResponse(content=rendered_reply)
 
@@ -190,6 +201,23 @@ async def chat_wechat_validation(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@app.post("/api/chat/completions", response_model=ChatResponse)
+def create_chat_completion(req: ChatRequest) -> ChatResponse:
+    """Return a non-streaming web chat response through the shared RAG flow."""
+    try:
+        return handle_chat_request(
+            req,
+            execution_context=ChatExecutionContext.web(),
+        )
+    except LLMConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LLMRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("web chat completion failed: %s", exc)
+        raise HTTPException(status_code=500, detail="聊天请求处理失败") from exc
+
+
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest):
     try:
@@ -201,7 +229,7 @@ async def chat_stream(req: ChatRequest):
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     def _iter_events():
-        for item in iter_stream_chat_events(req):
+        for item in iter_stream_chat_events(req, rag_runtime_validated=True):
             yield _sse(item)
 
     headers = {

@@ -2,24 +2,28 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any, Literal
 
-from rag.logutil import configure_logging, preview_text
+from langgraph.graph import END, START, StateGraph
 
-configure_logging()
-
+from rag.chat_context import ChatExecutionContext, ChatGraphState, ChatResultType
 from rag.config import (
     COLLECTION_NAME,
     MAX_HISTORY_MESSAGES,
     ROLE_FILTER_MULTIPLIER,
-    TOP_K_RETRIEVE,
     TOP_K_RERANK,
+    TOP_K_RETRIEVE,
 )
 from rag.document_metadata import ensure_document_metadata
-from rag.llm import get_llm, get_little_llm, get_llm_runtime_status
+from rag.llm import get_little_llm, get_llm, get_llm_runtime_status
+from rag.logutil import configure_logging
 from rag.reranker import BGEReranker
 from rag.retriever import get_vectorstore, get_vectorstore_backend
+from rag.score_query_graph import ScoreQueryWorkflow
+
+configure_logging()
 
 log = logging.getLogger(__name__)
 
@@ -377,56 +381,205 @@ def query_rewrite(query: str) -> str:
     return _message_text(llm.invoke(prompt))
 
 
+def _validate_rag_runtime_node(state: ChatGraphState) -> ChatGraphState:
+    if not state.get("rag_runtime_validated"):
+        get_llm_runtime_status()
+    return {"result_type": ChatResultType.RAG}
+
+
+def _contextualize_node(state: ChatGraphState) -> ChatGraphState:
+    started_at = time.perf_counter()
+    history = state.get("history") or []
+    standalone = contextualize_for_search(
+        state["user_message"],
+        history if history else None,
+    )
+    log.info(
+        "rag graph contextualize in %.3fs query_len=%d",
+        time.perf_counter() - started_at,
+        len(standalone),
+    )
+    return {"standalone_query": standalone}
+
+
+def _route_after_contextualize(
+    state: ChatGraphState,
+) -> Literal["rewrite_query", "retrieve"]:
+    return "rewrite_query" if state["use_rewrite"] else "retrieve"
+
+
+def _rewrite_node(state: ChatGraphState) -> ChatGraphState:
+    started_at = time.perf_counter()
+    rewritten = query_rewrite(state["standalone_query"])
+    log.info(
+        "rag graph rewrite in %.3fs query_len=%d",
+        time.perf_counter() - started_at,
+        len(rewritten),
+    )
+    return {"retrieval_query": rewritten}
+
+
+def _retrieve_node(state: ChatGraphState) -> ChatGraphState:
+    query = state.get("retrieval_query") or state["standalone_query"]
+    retrieval = retrieve_with_metrics(query)
+    return {
+        "retrieval_query": query,
+        "retrieval": retrieval,
+        "documents": retrieval.documents,
+    }
+
+
+def _build_prompt_node(state: ChatGraphState) -> ChatGraphState:
+    return {
+        "prompt": build_prompt(
+            state["user_message"].strip(),
+            state["documents"],
+            history=state.get("history") or [],
+        )
+    }
+
+
+def _route_after_prompt(
+    state: ChatGraphState,
+) -> Literal["generate_answer", "end"]:
+    return "end" if state.get("defer_generation") else "generate_answer"
+
+
+def _generate_node(state: ChatGraphState) -> ChatGraphState:
+    started_at = time.perf_counter()
+    answer = _message_text(get_llm().invoke(state["prompt"]))
+    log.info(
+        "rag graph generate in %.3fs answer_len=%d",
+        time.perf_counter() - started_at,
+        len(answer),
+    )
+    return {"answer": answer}
+
+
+def _build_chat_graph(score_workflow: ScoreQueryWorkflow):
+    builder = StateGraph(ChatGraphState)
+    builder.add_node("load_score_context", score_workflow.load_score_context)
+    builder.add_node("classify_score_intent", score_workflow.classify_intent)
+    builder.add_node("extract_score_slots", score_workflow.extract_slots)
+    builder.add_node(
+        "merge_or_persist_score_context",
+        score_workflow.merge_or_persist_context,
+    )
+    builder.add_node("build_score_clarification", score_workflow.build_clarification)
+    builder.add_node("build_score_h5_reply", score_workflow.build_h5_reply)
+    builder.add_node("validate_rag_runtime", _validate_rag_runtime_node)
+    builder.add_node("contextualize", _contextualize_node)
+    builder.add_node("rewrite_query", _rewrite_node)
+    builder.add_node("retrieve", _retrieve_node)
+    builder.add_node("build_prompt", _build_prompt_node)
+    builder.add_node("generate_answer", _generate_node)
+    builder.add_edge(START, "load_score_context")
+    builder.add_edge("load_score_context", "classify_score_intent")
+    builder.add_conditional_edges(
+        "classify_score_intent",
+        score_workflow.route_after_intent,
+        {
+            "score_query": "extract_score_slots",
+            "intent_clarification": "build_score_clarification",
+            "rag": "validate_rag_runtime",
+        },
+    )
+    builder.add_edge("extract_score_slots", "merge_or_persist_score_context")
+    builder.add_conditional_edges(
+        "merge_or_persist_score_context",
+        score_workflow.route_after_context,
+        {
+            "clarify": "build_score_clarification",
+            "reply_with_link": "build_score_h5_reply",
+        },
+    )
+    builder.add_edge("build_score_clarification", END)
+    builder.add_edge("build_score_h5_reply", END)
+    builder.add_edge("validate_rag_runtime", "contextualize")
+    builder.add_conditional_edges(
+        "contextualize",
+        _route_after_contextualize,
+        {"rewrite_query": "rewrite_query", "retrieve": "retrieve"},
+    )
+    builder.add_edge("rewrite_query", "retrieve")
+    builder.add_edge("retrieve", "build_prompt")
+    builder.add_conditional_edges(
+        "build_prompt",
+        _route_after_prompt,
+        {"generate_answer": "generate_answer", "end": END},
+    )
+    builder.add_edge("generate_answer", END)
+    return builder.compile(name="xinshi-unified-chat")
+
+
+_score_query_workflow = ScoreQueryWorkflow.from_env()
+_chat_graph = _build_chat_graph(_score_query_workflow)
+
+
+def _graph_input(
+    user_message: str,
+    history: list[dict[str, str]] | None,
+    use_rewrite: bool,
+    *,
+    defer_generation: bool,
+    execution_context: ChatExecutionContext,
+) -> ChatGraphState:
+    return {
+        "user_message": user_message,
+        "history": (history or [])[-MAX_HISTORY_MESSAGES:],
+        "use_rewrite": use_rewrite,
+        "defer_generation": defer_generation,
+        "channel": execution_context.channel,
+        "score_intent_enabled": execution_context.score_intent_enabled,
+        "channel_user_id": execution_context.channel_user_id,
+        "message_id": execution_context.message_id,
+        "rag_runtime_validated": execution_context.rag_runtime_validated,
+    }
+
+
 def answer_question(
     user_message: str,
     *,
     history: list[dict[str, str]] | None = None,
     use_rewrite: bool = True,
+    execution_context: ChatExecutionContext | None = None,
 ) -> dict:
     """供 CLI / HTTP 调用：可选多轮 history（不含当前句），检索 + 生成回答。"""
     t_all = time.perf_counter()
-    hist = history or []
-    hist = hist[-MAX_HISTORY_MESSAGES:]
+    hist = (history or [])[-MAX_HISTORY_MESSAGES:]
     log.info(
-        "answer_question start use_rewrite=%s history_len=%d user_len=%d preview=%r",
+        "answer_question start use_rewrite=%s history_len=%d user_len=%d",
         use_rewrite,
         len(hist),
         len(user_message),
-        preview_text(user_message, 100),
     )
     try:
-        t_ctx = time.perf_counter()
-        standalone = contextualize_for_search(user_message, hist if hist else None)
-        log.info(
-            "contextualize_for_search in %.3fs preview=%r",
-            time.perf_counter() - t_ctx,
-            preview_text(standalone, 100),
-        )
-
-        if use_rewrite:
-            t_rw = time.perf_counter()
-            q = query_rewrite(standalone)
-            log.info(
-                "query_rewrite done in %.3fs preview=%r",
-                time.perf_counter() - t_rw,
-                preview_text(q, 100),
+        state = _chat_graph.invoke(
+            _graph_input(
+                user_message,
+                hist,
+                use_rewrite,
+                defer_generation=False,
+                execution_context=(
+                    execution_context or ChatExecutionContext.internal()
+                ),
             )
-        else:
-            q = standalone
-
-        retrieval = retrieve_with_metrics(q)
-        docs = retrieval.documents
-
-        t_llm = time.perf_counter()
-        prompt = build_prompt(user_message.strip(), docs, history=hist)
-        llm = get_llm()
-        response = llm.invoke(prompt)
-        answer = _message_text(response)
-        log.info(
-            "llm invoke done in %.3fs answer_len=%d",
-            time.perf_counter() - t_llm,
-            len(answer),
         )
+        if state["result_type"] is not ChatResultType.RAG:
+            return {
+                "answer": state["answer"],
+                "rewritten_query": None,
+                "standalone_query": None,
+                "sources": [],
+                "source_details": [],
+                "retrieval_candidates": None,
+                "retrieval_metrics": None,
+            }
+        retrieval = state["retrieval"]
+        docs = state["documents"]
+        answer = state["answer"]
+        standalone = state["standalone_query"]
+        q = state["retrieval_query"]
 
         sources = [d.metadata.get("section") or "" for d in docs]
         source_details = [_source_detail(document) for document in docs]
@@ -462,46 +615,40 @@ def stream_answer_question(
     history: list[dict[str, str]] | None = None,
     use_rewrite: bool = True,
     include_retrieval_trace: bool = False,
+    rag_runtime_validated: bool = False,
 ) -> Iterator[dict]:
     """流式版本：先检索，再按 chunk 逐步输出回答文本。"""
     t_all = time.perf_counter()
     hist = history or []
     hist = hist[-MAX_HISTORY_MESSAGES:]
     log.info(
-        "stream_answer_question start use_rewrite=%s history_len=%d user_len=%d preview=%r",
+        "stream_answer_question start use_rewrite=%s history_len=%d user_len=%d",
         use_rewrite,
         len(hist),
         len(user_message),
-        preview_text(user_message, 100),
     )
 
-    t_ctx = time.perf_counter()
-    standalone = contextualize_for_search(user_message, hist if hist else None)
-    log.info(
-        "stream contextualize_for_search in %.3fs preview=%r",
-        time.perf_counter() - t_ctx,
-        preview_text(standalone, 100),
-    )
-
-    if use_rewrite:
-        t_rw = time.perf_counter()
-        q = query_rewrite(standalone)
-        log.info(
-            "stream query_rewrite done in %.3fs preview=%r",
-            time.perf_counter() - t_rw,
-            preview_text(q, 100),
+    state = _chat_graph.invoke(
+        _graph_input(
+            user_message,
+            hist,
+            use_rewrite,
+            defer_generation=True,
+            execution_context=ChatExecutionContext.stream(
+                rag_runtime_validated=rag_runtime_validated,
+            ),
         )
-    else:
-        q = standalone
-
-    retrieval = retrieve_with_metrics(q)
-    docs = retrieval.documents
+    )
+    standalone = state["standalone_query"]
+    q = state["retrieval_query"]
+    retrieval = state["retrieval"]
+    docs = state["documents"]
     sources = [d.metadata.get("section") or "" for d in docs]
     source_details = [_source_detail(document) for document in docs]
     retrieval_candidates = [
         _source_detail(document) for document in retrieval.raw_documents
     ]
-    prompt = build_prompt(user_message.strip(), docs, history=hist)
+    prompt = state["prompt"]
     llm = get_llm()
 
     meta_event = {

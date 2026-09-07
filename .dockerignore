@@ -8,5 +8,10 @@ venv/
 **/*.py[codz]
 **/.env
 models/
+# BGE 仍由 Compose 的宿主机模型目录挂载；仅将小型校准分类器打入镜像。
+!rag/models/
+rag/models/*
+!rag/models/intent/
+!rag/models/intent/svc.joblib
 hf_cache/
 install/milvus/.env

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 try:
     from langchain_deepseek import ChatDeepSeek
@@ -88,6 +89,7 @@ def _create_chat_model(
     model_name: str,
     max_tokens: int,
     temperature: float,
+    timeout_seconds: float | None = None,
 ) -> StrictChatModel:
     """Create DeepSeek without any local fallback behavior."""
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
@@ -104,15 +106,19 @@ def _create_chat_model(
     if not normalized_model_name:
         raise LLMConfigurationError("DeepSeek 模型名称不能为空")
 
+    client_kwargs = {
+        "model": normalized_model_name,
+        "api_key": api_key,
+        "streaming": True,
+        "stream_usage": True,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if timeout_seconds is not None:
+        client_kwargs["timeout"] = timeout_seconds
+
     try:
-        client = ChatDeepSeek(
-            model=normalized_model_name,
-            api_key=api_key,
-            streaming=True,
-            stream_usage=True,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        client = ChatDeepSeek(**client_kwargs)
     except Exception as exc:
         raise LLMConfigurationError(
             "DeepSeek 客户端初始化失败，请检查模型名称和 LLM 参数"
@@ -148,6 +154,51 @@ def get_little_llm() -> StrictChatModel:
             minimum=0.0,
             maximum=2.0,
         ),
+    )
+
+
+def get_intent_llm() -> StrictChatModel:
+    """Return the zero-temperature model used for score intent recognition."""
+    timeout_name = (
+        "SCORE_INTENT_LLM_TIMEOUT_MS"
+        if os.environ.get("SCORE_INTENT_LLM_TIMEOUT_MS") is not None
+        else "WECHAT_SCORE_INTENT_LLM_TIMEOUT_MS"
+    )
+    timeout_ms = _env_int(timeout_name, 1500, 1)
+    return _create_chat_model(
+        model_name=os.environ.get(
+            "DEEPSEEK_MODEL_INTENT",
+            os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        ),
+        max_tokens=128,
+        temperature=0.0,
+        timeout_seconds=timeout_ms / 1000.0,
+    )
+
+
+def get_score_slot_llm() -> StrictChatModel:
+    """Return the zero-temperature model used for score parameter extraction."""
+    timeout_name = (
+        "SCORE_SLOT_LLM_TIMEOUT_MS"
+        if os.environ.get("SCORE_SLOT_LLM_TIMEOUT_MS") is not None
+        else (
+            "SCORE_INTENT_LLM_TIMEOUT_MS"
+            if os.environ.get("SCORE_INTENT_LLM_TIMEOUT_MS") is not None
+            else "WECHAT_SCORE_INTENT_LLM_TIMEOUT_MS"
+        )
+    )
+    timeout_ms = _env_int(timeout_name, 1500, 1)
+    return _create_chat_model(
+        model_name=os.environ.get(
+            "DEEPSEEK_MODEL_SCORE_SLOT",
+            os.environ.get(
+                "DEEPSEEK_MODEL_INTENT",
+                os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            ),
+        ),
+        max_tokens=256,
+        temperature=0.0,
+        timeout_seconds=timeout_ms / 1000.0,
     )
 
 

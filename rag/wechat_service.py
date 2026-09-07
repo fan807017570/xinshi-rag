@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
 from xml.etree import ElementTree
 
-from rag.chat_service import handle_chat_request
-from rag.logutil import preview_text
 from rag.schemas import ChatRequest
 from rag.wechat_crypto import (
     decrypt_text_payload,
@@ -32,10 +31,6 @@ class WeChatSignatureError(WeChatPayloadError):
 class WeChatEnvelope:
     payload: dict
     body_format: str
-
-
-def _json_for_log(payload: dict | str | None) -> str:
-    return json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
 
 
 def _cdata(text: str) -> str:
@@ -68,10 +63,9 @@ def _dict_to_wechat_xml(payload: dict) -> str:
 def parse_encrypted_envelope(raw_body: bytes, content_type: str | None) -> WeChatEnvelope:
     raw_text = raw_body.decode("utf-8", errors="replace").strip()
     log.info(
-        "wechat request raw body len=%d content_type=%r preview=%r",
+        "wechat encrypted request received body_len=%d content_type=%s",
         len(raw_body),
-        content_type,
-        raw_text[:1000],
+        content_type or "unknown",
     )
     if not raw_text:
         raise WeChatPayloadError("请求体不能为空")
@@ -134,59 +128,67 @@ def _reply_plaintext(message: dict, message_format: str) -> str:
     return _text_reply_json(message)
 
 
+def _dispatch_chat_request(
+    request: ChatRequest,
+    *,
+    wechat_openid: str,
+    wechat_msg_id: str | None,
+) -> None:
+    """Load the RAG runtime only when a verified text message is dispatched."""
+    from rag.chat_service import handle_chat_request
+
+    handle_chat_request(
+        request,
+        wechat_openid=wechat_openid,
+        wechat_msg_id=wechat_msg_id,
+        async_wechat_reply=True,
+    )
+
+
 def build_encrypted_chat_reply(
     payload: dict,
     *,
     msg_signature: str,
     timestamp: str,
     nonce: str,
-    openid: str | None,
     signature_present: bool,
 ) -> dict | None:
-    log.info("wechat request encrypted payload=%s", _json_for_log(payload))
     encrypt = _extract_encrypt(payload)
     if not verify_msg_signature(msg_signature, timestamp, nonce, encrypt):
         log.warning(
-            "invalid WeChat msg_signature timestamp=%s nonce=%s openid=%s signature_ignored=%s",
-            timestamp,
-            nonce,
-            openid,
+            "invalid WeChat msg_signature signature_ignored=%s",
             signature_present,
         )
         raise WeChatSignatureError()
 
     plaintext = decrypt_text_payload(encrypt)
-    log.info("wechat request decrypted plaintext=%s", plaintext)
     msg, message_format = _parse_decrypted_message(plaintext)
-    log.info("wechat request decrypted payload=%s", _json_for_log(msg))
     msg_type = str(msg.get("MsgType") or "").strip()
     content = str(msg.get("Content") or "").strip()
     if msg_type and msg_type != "text":
-        log.info("ignore unsupported WeChat msg_type=%s openid=%s", msg_type, openid)
-        log.info("wechat response plaintext payload=%s", _json_for_log("success"))
-        log.info("wechat response encrypted payload=%s", _json_for_log(None))
+        log.info("ignore unsupported WeChat msg_type=%s", msg_type)
         return None
     if not content:
-        log.info("ignore WeChat message without Content msg_type=%s openid=%s", msg_type, openid)
-        log.info("wechat response plaintext payload=%s", _json_for_log("success"))
-        log.info("wechat response encrypted payload=%s", _json_for_log(None))
+        log.info("ignore WeChat message without Content msg_type=%s", msg_type)
         return None
 
+    reply_openid = str(msg.get("FromUserName") or "").strip()
+    if not reply_openid:
+        log.warning("ignore WeChat text message without FromUserName")
+        return None
     log.info(
-        "wechat encrypted message received format=%s from=%s to=%s openid=%s content_len=%d preview=%r",
+        "wechat text message accepted format=%s identity=%s content_len=%d",
         message_format,
-        msg.get("FromUserName"),
-        msg.get("ToUserName"),
-        openid,
+        _identity_digest(reply_openid),
         len(content),
-        preview_text(content, 80),
     )
-    reply_openid = str(msg.get("FromUserName") or openid or "").strip()
-    handle_chat_request(
+    _dispatch_chat_request(
         ChatRequest(message=content),
         wechat_openid=reply_openid,
-        async_wechat_reply=True,
+        wechat_msg_id=str(msg.get("MsgId") or "").strip() or None,
     )
-    log.info("wechat response plaintext payload=%s", _json_for_log(""))
-    log.info("wechat response encrypted payload=%s", _json_for_log(None))
     return None
+
+
+def _identity_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]

@@ -448,6 +448,31 @@ LLM 同样采用严格配置：缺少 `DEEPSEEK_API_KEY`、参数格式错误或
 远程 DeepSeek 请求因 Key、模型、账户或网络问题失败时，聊天接口会返回脱敏错误，
 不会在错误信息中输出凭据。
 
+网页 `index.html` 默认调用非流式聊天接口：
+
+```bash
+curl -X POST http://127.0.0.1:18765/api/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"学校地址在哪里？","history":[],"use_rewrite":true}'
+```
+
+该接口和微信公众号 `/api/chat` 共用唯一的 `xinshi-unified-chat` LangGraph，返回完整
+`ChatResponse` JSON。统一 Graph 会先识别成绩查询意图，命中后调用参数 LLM 提取学生
+姓名、时间范围、考试类型和可选学科；必填参数缺失时固定追问，完整时经服务端校验和
+URL 编码后拼接到固定 H5 入口。RAG 服务本身不查询或返回真实成绩。页面继续通过 `textContent` 显示纯文本，
+不生成 H5 超链接。普通问题仍进入原
+RAG 节点链，`POST /api/chat/stream` 继续保留原 SSE 行为且不启用成绩路由。
+
+成绩意图采用三级识别：简单规则明确是成绩查询时直接进入参数提取分支；明确不是成绩查询
+（如普通问题、成绩制度、录入操作、否定表达）时直接进入 RAG；只有规则无法确定的
+成绩相关表达才调用零温度意图 LLM 分类。参数完整时返回入口，不完整时进入补充流程。
+
+成绩查询共享配置优先使用 `SCORE_QUERY_ENABLED` 和 `SCORE_H5_URL`；旧部署中的
+`WECHAT_SCORE_QUERY_ENABLED`、`WECHAT_SCORE_H5_URL` 仍作为兼容回退。
+意图模型配置优先使用 `SCORE_INTENT_LLM_TIMEOUT_MS`、`SCORE_INTENT_THRESHOLD`，
+并兼容旧 `WECHAT_SCORE_INTENT_*` 名称。参数提取模型可通过
+`DEEPSEEK_MODEL_SCORE_SLOT` 和 `SCORE_SLOT_LLM_TIMEOUT_MS` 单独配置。
+
 查看当前索引实体数和来源文件覆盖率：
 
 ```bash

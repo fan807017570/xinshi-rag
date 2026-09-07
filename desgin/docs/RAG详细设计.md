@@ -8,14 +8,16 @@ RAG 功能不是单个类，而是多个 Python 模块、真实类和 LangChain 
 |---|---|---|
 | 请求模型 | [`rag/schemas.py`](../../rag/schemas.py) | 定义消息、请求和响应结构 |
 | 聊天前置编排 | [`rag/chat_service.py`](../../rag/chat_service.py) | 日期短路、机器字符串短路、历史转换、同步/流式入口 |
-| RAG 主编排 | [`rag/application.py`](../../rag/application.py) | 指代消解、查询改写、检索、过滤、重排、提示词、生成 |
+| 聊天内部上下文 | [`rag/chat_context.py`](../../rag/chat_context.py) | 定义可信渠道、结果类型和统一 Graph state |
+| 成绩查询节点 | [`rag/score_query_graph.py`](../../rag/score_query_graph.py) | 提供三级意图路由、LLM 参数提取、补齐和 H5 回复节点，不单独编译 Graph |
+| 统一聊天编排 | [`rag/application.py`](../../rag/application.py) | 在一张 Graph 中编排成绩分支及指代消解、改写、检索、重排和生成分支 |
 | 向量/本地检索 | [`rag/retriever.py`](../../rag/retriever.py) | 选择 Milvus 或 `LocalVectorStore`，实现本地文档加载和相似度 |
 | 重排 | [`rag/reranker.py`](../../rag/reranker.py) | CrossEncoder 重排、输入截断、批处理、分数缓存和回退 |
 | LLM 适配 | [`rag/llm.py`](../../rag/llm.py) | `ChatDeepSeek` 创建和本地 `_FallbackChatModel` |
 | 索引构建 | [`rag/ingest.py`](../../rag/ingest.py) | Markdown 切分、Embedding、Milvus Collection 全量重建 |
 | 表格处理 | [`rag/md_table.py`](../../rag/md_table.py) | 保持 GFM 表格完整并转换为可检索中文描述 |
 
-当前公开的 JSON 问答接口只有流式 `POST /api/chat/stream`。非流式 `answer_question()` 是内部/CLI 能力，也由微信后台任务调用；`POST /api/chat` 是微信加密消息接口，不是普通 JSON 问答接口。
+公开 JSON 问答接口包括同步 `POST /api/chat/completions` 和流式 `POST /api/chat/stream`；`POST /api/chat` 是微信加密消息接口。completions 与微信解密后的后台任务进入同一张 `xinshi-unified-chat` Graph，流式和默认内部/CLI 调用继续只走普通 RAG 分支。
 
 ## 2. 启动和对象生命周期
 
@@ -230,7 +232,7 @@ classDiagram
 
 ## 4. 普通问答流程
 
-`answer_question()` 用于微信后台问答、GET 校验自然语言扩展分支和 CLI。处理顺序如下：
+`answer_question()` 用于微信后台问答、GET 校验自然语言扩展分支和 CLI。知识库主链由名为 `xinshi-knowledge-rag` 的 LangGraph `StateGraph` 编排，节点只返回局部状态更新；HTTP/CLI 入口继续保持原有函数契约。
 
 ```mermaid
 %%{init: {"flowchart": {"curve": "stepBefore", "nodeSpacing": 50, "rankSpacing": 65}}}%%
@@ -240,24 +242,23 @@ flowchart TD
     precheck -->|"机器字符串"| echoAnswer["原样返回 message"]
     precheck -->|"自然语言"| history["history 截取最近 12 条消息"]
 
-    history --> hasHistory{"history 非空?"}
-    hasHistory -->|"是"| contextualize["get_little_llm.invoke<br/>消解那里/这个/还有吗等指代"]
-    hasHistory -->|"否"| standalone["standalone_query = 原始 message"]
-    contextualize --> standalone2["得到 standalone_query"]
-    standalone --> rewriteCheck
-    standalone2 --> rewriteCheck{"use_rewrite?"}
-    rewriteCheck -->|"是"| rewrite["get_llm.invoke<br/>追加领域同义词"]
-    rewriteCheck -->|"否"| query["检索 query = standalone_query"]
-    rewrite --> query2["得到 rewritten_query"]
-    query --> retrieve["retrieve(query)"]
-    query2 --> retrieve
-
+    history --> graphStart(("LangGraph START"))
+    graphStart --> contextualize["contextualize<br/>有历史时消解指代"]
+    contextualize --> rewriteCheck{"use_rewrite?"}
+    rewriteCheck -->|"是"| rewrite["rewrite_query<br/>追加领域同义词"]
+    rewriteCheck -->|"否"| retrieve["retrieve<br/>召回、过滤、重排"]
+    rewrite --> retrieve
     retrieve --> prompt["build_prompt<br/>文档 section + 内容 + history + 当前问题"]
-    prompt --> llm["get_llm.invoke(prompt)"]
+    prompt --> mode{"defer_generation?"}
+    mode -->|"否，同步"| llm["generate_answer<br/>get_llm.invoke"]
+    mode -->|"是，流式"| graphEnd(("END<br/>入口使用 llm.stream"))
+    llm --> graphEnd
     llm --> result["answer、sources、rewritten_query、standalone_query"]
     dateAnswer --> directResult["ChatResponse，sources 为空"]
     echoAnswer --> directResult
 ```
+
+同步与流式入口复用同一张图：同步调用执行到 `generate_answer`；流式调用把 `defer_generation=true`，在 `build_prompt` 后结束图执行，再由生成器逐块调用 `llm.stream`。因此改写、检索、重排、提示词和观测指标不会形成两套实现。
 
 ### 4.1 多轮历史
 

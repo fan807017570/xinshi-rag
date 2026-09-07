@@ -17,10 +17,6 @@ WECHAT_TOKEN_ENV = "WECHAT_TOKEN"
 WECHAT_ENCODING_AES_KEY_ENV = "WECHAT_ENCODING_AES_KEY"
 WECHAT_APPID_ENV = "WECHAT_APPID"
 
-DEFAULT_WECHAT_TOKEN = "AAAAA"
-DEFAULT_WECHAT_ENCODING_AES_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-DEFAULT_WECHAT_APPID = "wxba5fad812f8e6fb9"
-
 WECHAT_AES_BLOCK_SIZE = 32
 
 
@@ -40,16 +36,23 @@ class WeChatConfig:
     @classmethod
     def from_env(cls) -> "WeChatConfig":
         return cls(
-            token=os.environ.get(WECHAT_TOKEN_ENV, DEFAULT_WECHAT_TOKEN).strip(),
-            encoding_aes_key=os.environ.get(
-                WECHAT_ENCODING_AES_KEY_ENV,
-                DEFAULT_WECHAT_ENCODING_AES_KEY,
-            ).strip(),
-            appid=os.environ.get(WECHAT_APPID_ENV, DEFAULT_WECHAT_APPID).strip(),
+            token=os.environ.get(WECHAT_TOKEN_ENV, "").strip(),
+            encoding_aes_key=os.environ.get(WECHAT_ENCODING_AES_KEY_ENV, "").strip(),
+            appid=os.environ.get(WECHAT_APPID_ENV, "").strip(),
         )
+
+    def validate(self) -> None:
+        if not self.token or not self.encoding_aes_key or not self.appid:
+            raise WeChatCryptoError(
+                "WECHAT_TOKEN/WECHAT_ENCODING_AES_KEY/WECHAT_APPID 配置不完整",
+                500,
+            )
+        self.aes_key
 
     @property
     def aes_key(self) -> bytes:
+        if not self.encoding_aes_key:
+            raise WeChatCryptoError("WECHAT_ENCODING_AES_KEY 未配置", 500)
         try:
             aes_key = base64.b64decode(self.encoding_aes_key + "=", validate=True)
         except Exception as exc:

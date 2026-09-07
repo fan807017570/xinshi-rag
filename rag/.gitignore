@@ -3,7 +3,10 @@
 
 # HuggingFace 模型缓存
 hf_cache/
-models/
+models/*
+# 校准分类器体积较小，随服务发布；BGE/HuggingFace 模型仍由部署目录提供。
+!models/intent/
+!models/intent/*
 
 # Python
 __pycache__/

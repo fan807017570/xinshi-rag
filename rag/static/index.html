@@ -321,7 +321,7 @@
       thread.scrollTop = thread.scrollHeight;
     }
 
-    function createAssistantStreamRow() {
+    function createAssistantPendingRow() {
       const wrap = document.createElement("div");
       wrap.className = "msg assistant";
       const av = document.createElement("div");
@@ -329,17 +329,12 @@
       av.textContent = "校";
       const bubble = document.createElement("div");
       bubble.className = "bubble";
-      bubble.textContent = "";
+      bubble.textContent = "正在思考…";
       wrap.appendChild(av);
       wrap.appendChild(bubble);
       thread.appendChild(wrap);
       thread.scrollTop = thread.scrollHeight;
       return { wrap, bubble };
-    }
-
-    function appendAssistantText(row, text) {
-      row.bubble.textContent += text;
-      thread.scrollTop = thread.scrollHeight;
     }
 
     function setAssistantSources(row, sources) {
@@ -350,8 +345,8 @@
       row.bubble.appendChild(s);
     }
 
-    async function sendMessageStream(text, onDelta) {
-      const res = await fetch("/api/chat/stream", {
+    async function sendMessage(text) {
+      const res = await fetch("/api/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -360,72 +355,18 @@
           use_rewrite: true,
         }),
       });
+      const payload = await res.json().catch(() => null);
       if (!res.ok) {
-        const textBody = await res.text();
-        throw new Error(textBody || res.statusText || "请求失败");
+        const detail = payload && payload.detail;
+        const message = typeof detail === "string"
+          ? detail
+          : JSON.stringify(detail || payload || res.statusText || "请求失败");
+        throw new Error(message);
       }
-      if (!res.body) throw new Error("流式响应为空");
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buf = "";
-      let answer = "";
-      let sources = [];
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-
-        while (true) {
-          const splitAt = buf.indexOf("\n\n");
-          if (splitAt < 0) break;
-          const block = buf.slice(0, splitAt);
-          buf = buf.slice(splitAt + 2);
-          const lines = block.split("\n");
-          const dataLines = lines
-            .filter((ln) => ln.startsWith("data:"))
-            .map((ln) => ln.slice(5).trimStart());
-          if (!dataLines.length) continue;
-          const payloadStr = dataLines.join("\n");
-          let payload = null;
-          try {
-            payload = JSON.parse(payloadStr);
-          } catch (_) {
-            continue;
-          }
-          if (!payload || !payload.type) continue;
-
-          if (payload.type === "meta") {
-            if (Array.isArray(payload.sources)) sources = payload.sources;
-            continue;
-          }
-          if (payload.type === "delta") {
-            const delta = String(payload.content || "");
-            if (!delta) continue;
-            // 即使后端一次返回较大 chunk，也切小块渲染，保证“流式可见”。
-            const step = 8;
-            for (let i = 0; i < delta.length; i += step) {
-              const piece = delta.slice(i, i + step);
-              answer += piece;
-              onDelta(piece);
-              if (delta.length > step) {
-                await new Promise((r) => setTimeout(r, 8));
-              }
-            }
-            continue;
-          }
-          if (payload.type === "done") {
-            if (!answer && payload.answer) answer = String(payload.answer);
-            if (Array.isArray(payload.sources)) sources = payload.sources;
-            continue;
-          }
-          if (payload.type === "error") {
-            throw new Error(payload.detail || "流式请求失败");
-          }
-        }
+      if (!payload || typeof payload.answer !== "string") {
+        throw new Error("聊天接口返回格式不正确");
       }
-      return { answer, sources };
+      return payload;
     }
 
     form.addEventListener("submit", async (e) => {
@@ -435,19 +376,18 @@
       input.value = "";
       addMessage("user", text);
       sendBtn.disabled = true;
-      const streamRow = createAssistantStreamRow();
+      const assistantRow = createAssistantPendingRow();
       try {
-        const data = await sendMessageStream(text, (delta) => {
-          appendAssistantText(streamRow, delta);
-        });
-        setAssistantSources(streamRow, data.sources || []);
+        const data = await sendMessage(text);
+        assistantRow.bubble.textContent = data.answer || "未返回有效回答";
+        setAssistantSources(assistantRow, data.sources || []);
         chatHistory.push({ role: "user", content: text });
         chatHistory.push({ role: "assistant", content: data.answer || "" });
         if (chatHistory.length > MAX_HISTORY) {
           chatHistory = chatHistory.slice(-MAX_HISTORY);
         }
       } catch (err) {
-        streamRow.wrap.remove();
+        assistantRow.wrap.remove();
         addMessage("assistant", "出错了：" + (err.message || String(err)));
       }
       sendBtn.disabled = false;

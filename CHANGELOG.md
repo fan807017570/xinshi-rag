@@ -6,6 +6,11 @@
 
 ### 新增
 
+- 新增网页非流式聊天接口 `POST /api/chat/completions`，并将 `index.html` 切换到该接口。
+- 将成绩查询意图和普通 RAG 合并到唯一的 `xinshi-unified-chat` LangGraph；网页同步接口与微信公众号入口共用该编排。
+- 网页端支持成绩查询参数补充，参数完整后以纯文本展示经过 URL 编码的固定 H5 入口，不生成超链接。
+- 成绩意图调整为三级识别：规则明确查询时直接返回链接，规则明确非查询时直接进入 RAG，仅不确定表达调用 LLM。
+- 成绩查询命中后使用独立零温度 LLM 提取姓名、时间、考试类型和学科，缺少必填参数时追问，完整后拼接到固定 H5 URL。
 - 聊天响应新增稳定 `document_id`、相对 `source`、检索/重排分数及分层检索指标。
 - 新增 `/api/docs/index` 索引覆盖率接口和 JSONL RAG 分层评测工具。
 - 新增外部运行配置 `config/application.ini`，集中管理原 `config.py` 中的 Milvus、模型、重排、检索和会话参数。
